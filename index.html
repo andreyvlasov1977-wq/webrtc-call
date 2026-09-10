@@ -131,8 +131,31 @@ const defaultWsUrl = (window.location.protocol === "https:" ? "wss://" : "ws://"
   + window.location.host + "/ws";
 const SIGNALING_URL = paramsForWs.get("ws") || defaultWsUrl;
 
+// ICE-серверы: STUN для обычного случая + TURN как запасной вариант, если
+// прямое P2P-соединение не проходит (строгий NAT / корпоративный файрвол
+// у одной из сторон). TURN-серверы ниже — бесплатные публичные (Open Relay
+// Project), общий демо-доступ без регистрации, могут быть с ограничением
+// по нагрузке, но для личных звонков этого достаточно.
 const STUN_SERVERS = {
-  iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:openrelay.metered.ca:80" },
+    {
+      urls: "turn:openrelay.metered.ca:80",
+      username: "openrelayproject",
+      credential: "openrelayproject",
+    },
+    {
+      urls: "turn:openrelay.metered.ca:443",
+      username: "openrelayproject",
+      credential: "openrelayproject",
+    },
+    {
+      urls: "turn:openrelay.metered.ca:443?transport=tcp",
+      username: "openrelayproject",
+      credential: "openrelayproject",
+    },
+  ]
 };
 
 // ====== Комната берём из URL: ?room=abc123 ======
@@ -359,7 +382,7 @@ function connectSignaling() {
 
       case "answer":
         await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-        setStatus("Соединение установлено");
+        setStatus("Устанавливаем соединение…");
         break;
 
       case "ice-candidate":
@@ -393,8 +416,12 @@ function setupPeerConnection() {
 
   pc.onconnectionstatechange = () => {
     console.log("Connection state:", pc.connectionState);
-    if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
-      setStatus("Соединение прервано");
+    if (pc.connectionState === "connected") {
+      setStatus("Соединение установлено");
+    } else if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
+      setStatus("Не удалось установить соединение (проблема с сетью/NAT)");
+    } else if (pc.connectionState === "connecting") {
+      setStatus("Устанавливаем соединение…");
     }
   };
 }
