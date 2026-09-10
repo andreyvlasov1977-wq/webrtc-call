@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Видеозвонок</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #111;
+    color: #eee;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  #status-bar {
+    padding: 10px 16px;
+    background: #1c1c1c;
+    font-size: 14px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid #333;
+  }
+  #room-info { color: #999; }
+  #video-area {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr;
+    gap: 8px;
+    padding: 8px;
+    min-height: 0;
+  }
+  video {
+    width: 100%;
+    height: 100%;
+    background: #000;
+    border-radius: 8px;
+    object-fit: cover;
+  }
+  .video-wrap { position: relative; height: 100%; min-height: 0; }
+  .video-label {
+    position: absolute;
+    bottom: 8px;
+    left: 8px;
+    background: rgba(0,0,0,0.6);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+  #controls {
+    padding: 12px;
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    background: #1c1c1c;
+    border-top: 1px solid #333;
+  }
+  button {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 8px;
+    background: #333;
+    color: #eee;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  button:hover { background: #444; }
+  #mute-btn.active, #cam-btn.active { background: #b33; }
+  #share-link {
+    background: #2a2a2a;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    color: #9cf;
+    word-break: break-all;
+  }
+  select {
+    background: #2a2a2a;
+    color: #eee;
+    border: 1px solid #444;
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 13px;
+    max-width: 220px;
+  }
+  @media (max-width: 700px) {
+    #video-area { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div id="status-bar">
+  <span id="status-text">Подключение…</span>
+  <span id="room-info"></span>
+</div>
+
+<div id="video-area">
+  <div class="video-wrap">
+    <video id="localVideo" autoplay playsinline muted></video>
+    <span class="video-label">Вы</span>
+  </div>
+  <div class="video-wrap">
+    <video id="remoteVideo" autoplay playsinline></video>
+    <span class="video-label">Собеседник</span>
+  </div>
+</div>
+
+<div id="controls">
+  <button id="mute-btn">🎤 Микрофон</button>
+  <button id="cam-btn">📷 Камера</button>
+  <select id="camSelect" title="Выбор камеры"></select>
+  <select id="micSelect" title="Выбор микрофона"></select>
+  <span id="share-link"></span>
+</div>
+
+<audio id="ringSound" src="https://cdn.jsdelivr.net/gh/anars/blank-audio@master/2-seconds-of-silence.mp3" preload="auto"></audio>
+
+<script>
+// ====== НАСТРОЙКИ ======
+// По умолчанию signaling подключается к тому же адресу, с которого открыта
+// страница (путь /ws) — так и локально, и на хостинге всё работает без
+// дополнительных параметров. Можно переопределить параметром ?ws=..., если
+// сервер и страница по какой-то причине живут по разным адресам.
+const paramsForWs = new URLSearchParams(window.location.search);
+const defaultWsUrl = (window.location.protocol === "https:" ? "wss://" : "ws://")
+  + window.location.host + "/ws";
+const SIGNALING_URL = paramsForWs.get("ws") || defaultWsUrl;
+
+const STUN_SERVERS = {
+  iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+};
+
+// ====== Комната берём из URL: ?room=abc123 ======
+const params = new URLSearchParams(window.location.search);
+let roomId = params.get("room");
+if (!roomId) {
+  roomId = Math.random().toString(36).substring(2, 8);
+  const newUrl = `${window.location.pathname}?room=${roomId}`;
+  window.history.replaceState({}, "", newUrl);
+}
+document.getElementById("room-info").textContent = `Комната: ${roomId}`;
+document.getElementById("share-link").textContent = window.location.href;
+
+// ====== Состояние ======
+const statusText = document.getElementById("status-text");
+const localVideo = document.getElementById("localVideo");
+const remoteVideo = document.getElementById("remoteVideo");
+let localStream = null;
+let pc = null;
+let ws = null;
+let isInitiator = false;
+
+function setStatus(text) {
+  statusText.textContent = text;
+  console.log("[status]", text);
+}
+
+// ====== Уведомление о входящем (звук + мигание заголовка) ======
+let titleBlinkInterval = null;
+function notifyPeerJoined() {
+  // Звук
+  const audio = document.getElementById("ringSound");
+  audio.play().catch(() => {
+    console.warn("Автовоспроизведение звука заблокировано браузером — нужно один раз кликнуть на странице.");
+  });
+
+  // Мигание заголовка вкладки
+  let toggled = false;
+  const originalTitle = document.title;
+  clearInterval(titleBlinkInterval);
+  let blinkCount = 0;
+  titleBlinkInterval = setInterval(() => {
+    document.title = toggled ? originalTitle : "📞 Собеседник в сети!";
+    toggled = !toggled;
+    blinkCount++;
+    if (blinkCount > 10) {
+      clearInterval(titleBlinkInterval);
+      document.title = originalTitle;
+    }
+  }, 1000);
+
+  // Системное уведомление браузера
+  if ("Notification" in window) {
+    if (Notification.permission === "granted") {
+      new Notification("Собеседник подключился", { body: `Комната ${roomId}` });
+    } else if (Notification.permission !== "denied") {
+      Notification.requestPermission();
+    }
+  }
+}
+
+// ====== Выбор камеры/микрофона ======
+const camSelect = document.getElementById("camSelect");
+const micSelect = document.getElementById("micSelect");
+let currentCamId = null;
+let currentMicId = null;
+
+// Устройства с такими словами в названии пропускаем при автовыборе по умолчанию
+// (виртуальные камеры часто дают чёрный экран, если их источник ничего не транслирует)
+const VIRTUAL_CAM_HINTS = ["obs", "virtual", "screen capture", "manycam", "snap camera"];
+
+function looksVirtual(label) {
+  const l = label.toLowerCase();
+  return VIRTUAL_CAM_HINTS.some(hint => l.includes(hint));
+}
+
+async function populateDeviceLists() {
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const cams = devices.filter(d => d.kind === "videoinput");
+  const mics = devices.filter(d => d.kind === "audioinput");
+
+  camSelect.innerHTML = "";
+  cams.forEach((d, i) => {
+    const opt = document.createElement("option");
+    opt.value = d.deviceId;
+    opt.textContent = d.label || `Камера ${i + 1}`;
+    camSelect.appendChild(opt);
+  });
+
+  micSelect.innerHTML = "";
+  mics.forEach((d, i) => {
+    const opt = document.createElement("option");
+    opt.value = d.deviceId;
+    opt.textContent = d.label || `Микрофон ${i + 1}`;
+    micSelect.appendChild(opt);
+  });
+
+  // По умолчанию выбираем первое устройство, не похожее на виртуальное
+  const preferredCam = cams.find(d => !looksVirtual(d.label)) || cams[0];
+  if (preferredCam) {
+    camSelect.value = preferredCam.deviceId;
+    currentCamId = preferredCam.deviceId;
+  }
+  if (mics[0]) {
+    micSelect.value = mics[0].deviceId;
+    currentMicId = mics[0].deviceId;
+  }
+}
+
+async function openStreamWithSelectedDevices() {
+  // Останавливаем предыдущий поток, если был (чтобы не держать камеру занятой)
+  if (localStream) {
+    localStream.getTracks().forEach(t => t.stop());
+  }
+
+  const constraints = {
+    video: currentCamId ? { deviceId: { exact: currentCamId } } : true,
+    audio: currentMicId ? { deviceId: { exact: currentMicId } } : true,
+  };
+
+  localStream = await navigator.mediaDevices.getUserMedia(constraints);
+  localVideo.srcObject = localStream;
+
+  // Если WebRTC-соединение уже установлено — подменяем треки "на лету",
+  // чтобы собеседник тоже увидел новое устройство без переподключения
+  if (pc) {
+    const newVideoTrack = localStream.getVideoTracks()[0];
+    const newAudioTrack = localStream.getAudioTracks()[0];
+    pc.getSenders().forEach(sender => {
+      if (sender.track && sender.track.kind === "video" && newVideoTrack) {
+        sender.replaceTrack(newVideoTrack);
+      }
+      if (sender.track && sender.track.kind === "audio" && newAudioTrack) {
+        sender.replaceTrack(newAudioTrack);
+      }
+    });
+  }
+}
+
+camSelect.addEventListener("change", async () => {
+  currentCamId = camSelect.value;
+  try {
+    await openStreamWithSelectedDevices();
+  } catch (err) {
+    setStatus("Не удалось переключить камеру: " + err.message);
+  }
+});
+
+micSelect.addEventListener("change", async () => {
+  currentMicId = micSelect.value;
+  try {
+    await openStreamWithSelectedDevices();
+  } catch (err) {
+    setStatus("Не удалось переключить микрофон: " + err.message);
+  }
+});
+
+// ====== Инициализация медиа + WebRTC ======
+async function start() {
+  try {
+    // Сначала запрашиваем доступ вообще к чему угодно — иначе браузер
+    // не покажет названия устройств (label) в enumerateDevices()
+    const tempStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    tempStream.getTracks().forEach(t => t.stop());
+
+    await populateDeviceLists();
+    await openStreamWithSelectedDevices();
+  } catch (err) {
+    setStatus("Ошибка доступа к камере/микрофону: " + err.message);
+    return;
+  }
+
+  connectSignaling();
+}
+
+let reconnectDelay = 1000; // начинаем с 1 секунды, увеличиваем при повторных неудачах
+
+function connectSignaling() {
+  ws = new WebSocket(SIGNALING_URL);
+
+  ws.onopen = () => {
+    setStatus("Подключено к серверу, вход в комнату…");
+    reconnectDelay = 1000; // сброс задержки после успешного подключения
+    ws.send(JSON.stringify({ type: "join", room: roomId }));
+  };
+
+  ws.onclose = () => {
+    setStatus(`Соединение с сервером потеряно, переподключение через ${Math.round(reconnectDelay / 1000)} с…`);
+    setTimeout(() => {
+      reconnectDelay = Math.min(reconnectDelay * 1.5, 15000); // не больше 15 секунд между попытками
+      connectSignaling();
+    }, reconnectDelay);
+  };
+  ws.onerror = () => setStatus("Ошибка соединения с сервером");
+
+  ws.onmessage = async (event) => {
+    const msg = JSON.parse(event.data);
+
+    switch (msg.type) {
+      case "joined":
+        isInitiator = msg.isInitiator;
+        setStatus(isInitiator ? "Ждём собеседника…" : "Подключаемся к собеседнику…");
+        setupPeerConnection();
+        break;
+
+      case "room-full":
+        setStatus("Комната уже занята двумя участниками");
+        break;
+
+      case "peer-joined":
+        setStatus("Собеседник подключился, устанавливаем соединение…");
+        notifyPeerJoined();
+        if (isInitiator) await makeOffer();
+        break;
+
+      case "peer-left":
+        setStatus("Собеседник вышел");
+        remoteVideo.srcObject = null;
+        break;
+
+      case "offer":
+        await handleOffer(msg);
+        break;
+
+      case "answer":
+        await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+        setStatus("Соединение установлено");
+        break;
+
+      case "ice-candidate":
+        if (msg.candidate) {
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+          } catch (e) {
+            console.warn("Не удалось добавить ICE-кандидата", e);
+          }
+        }
+        break;
+    }
+  };
+}
+
+function setupPeerConnection() {
+  pc = new RTCPeerConnection(STUN_SERVERS);
+
+  localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+  pc.ontrack = (event) => {
+    remoteVideo.srcObject = event.streams[0];
+    setStatus("Соединение установлено");
+  };
+
+  pc.onicecandidate = (event) => {
+    if (event.candidate) {
+      ws.send(JSON.stringify({ type: "ice-candidate", candidate: event.candidate }));
+    }
+  };
+
+  pc.onconnectionstatechange = () => {
+    console.log("Connection state:", pc.connectionState);
+    if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
+      setStatus("Соединение прервано");
+    }
+  };
+}
+
+async function makeOffer() {
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  ws.send(JSON.stringify({ type: "offer", sdp: offer }));
+}
+
+async function handleOffer(msg) {
+  await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  ws.send(JSON.stringify({ type: "answer", sdp: answer }));
+}
+
+// ====== Кнопки управления ======
+document.getElementById("mute-btn").addEventListener("click", (e) => {
+  const audioTrack = localStream.getAudioTracks()[0];
+  if (!audioTrack) return;
+  audioTrack.enabled = !audioTrack.enabled;
+  e.target.classList.toggle("active", !audioTrack.enabled);
+  e.target.textContent = audioTrack.enabled ? "🎤 Микрофон" : "🔇 Микрофон выкл";
+});
+
+document.getElementById("cam-btn").addEventListener("click", (e) => {
+  const videoTrack = localStream.getVideoTracks()[0];
+  if (!videoTrack) return;
+  videoTrack.enabled = !videoTrack.enabled;
+  e.target.classList.toggle("active", !videoTrack.enabled);
+  e.target.textContent = videoTrack.enabled ? "📷 Камера" : "📷 Камера выкл";
+});
+
+// Запрашиваем разрешение на уведомления сразу (по клику где-то на странице тоже сработает)
+if ("Notification" in window && Notification.permission === "default") {
+  document.body.addEventListener("click", () => Notification.requestPermission(), { once: true });
+}
+
+start();
+</script>
+</body>
+</html>
