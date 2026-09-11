@@ -90,6 +90,16 @@
   @media (max-width: 700px) {
     #video-area { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
   }
+  #diagnostics {
+    background: #191919;
+    color: #8c8;
+    font-family: "Courier New", monospace;
+    font-size: 12px;
+    padding: 6px 16px;
+    white-space: pre-wrap;
+    border-bottom: 1px solid #333;
+    min-height: 18px;
+  }
 </style>
 </head>
 <body>
@@ -98,6 +108,8 @@
   <span id="status-text">Подключение…</span>
   <span id="room-info"></span>
 </div>
+
+<div id="diagnostics"></div>
 
 <div id="video-area">
   <div class="video-wrap">
@@ -398,6 +410,20 @@ function connectSignaling() {
   };
 }
 
+// ====== Диагностика соединения (видно на странице, без консоли) ======
+const diagEl = document.getElementById("diagnostics");
+const candidateCounts = { host: 0, srflx: 0, relay: 0, prflx: 0 };
+
+function updateDiagnostics() {
+  if (!pc) return;
+  const parts = [
+    `ICE: ${pc.iceConnectionState}`,
+    `Сбор кандидатов: ${pc.iceGatheringState}`,
+    `Локальные кандидаты — host:${candidateCounts.host} srflx(STUN):${candidateCounts.srflx} relay(TURN):${candidateCounts.relay}`,
+  ];
+  diagEl.textContent = parts.join(" | ");
+}
+
 function setupPeerConnection() {
   pc = new RTCPeerConnection(STUN_SERVERS);
 
@@ -411,11 +437,20 @@ function setupPeerConnection() {
   pc.onicecandidate = (event) => {
     if (event.candidate) {
       ws.send(JSON.stringify({ type: "ice-candidate", candidate: event.candidate }));
+      const type = event.candidate.type; // host / srflx / relay / prflx
+      if (candidateCounts[type] !== undefined) candidateCounts[type]++;
+      updateDiagnostics();
+    } else {
+      updateDiagnostics(); // сбор кандидатов завершён
     }
   };
 
+  pc.oniceconnectionstatechange = updateDiagnostics;
+  pc.onicegatheringstatechange = updateDiagnostics;
+
   pc.onconnectionstatechange = () => {
     console.log("Connection state:", pc.connectionState);
+    updateDiagnostics();
     if (pc.connectionState === "connected") {
       setStatus("Соединение установлено");
     } else if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
