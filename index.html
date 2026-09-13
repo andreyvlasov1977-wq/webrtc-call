@@ -144,28 +144,36 @@ const defaultWsUrl = (window.location.protocol === "https:" ? "wss://" : "ws://"
 const SIGNALING_URL = paramsForWs.get("ws") || defaultWsUrl;
 
 // ICE-серверы: STUN для обычного случая + TURN как запасной вариант, если
-// прямое P2P-соединение не проходит (строгий NAT / корпоративный файрвол
-// у одной из сторон). TURN-серверы ниже — бесплатные публичные (Open Relay
-// Project), общий демо-доступ без регистрации, могут быть с ограничением
-// по нагрузке, но для личных звонков этого достаточно.
+// прямое P2P-соединение не проходит (строгий NAT / файрвол / провайдер режет
+// UDP). Ниже — персональные учётные данные на бесплатном тарифе Metered
+// (500 МБ/месяц), несколько адресов на случай, если какой-то порт/протокол
+// заблокирован у одной из сторон — браузер сам выберет рабочий.
+const TURN_USERNAME = "75556d18d30d047cd0e1e079";
+const TURN_CREDENTIAL = "cTxDYa/0CM0/dOCU";
+
 const STUN_SERVERS = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:openrelay.metered.ca:80" },
+    { urls: "stun:standard.relay.metered.ca:80" },
     {
-      urls: "turn:openrelay.metered.ca:80",
-      username: "openrelayproject",
-      credential: "openrelayproject",
+      urls: "turn:standard.relay.metered.ca:80",
+      username: TURN_USERNAME,
+      credential: TURN_CREDENTIAL,
     },
     {
-      urls: "turn:openrelay.metered.ca:443",
-      username: "openrelayproject",
-      credential: "openrelayproject",
+      urls: "turn:standard.relay.metered.ca:80?transport=tcp",
+      username: TURN_USERNAME,
+      credential: TURN_CREDENTIAL,
     },
     {
-      urls: "turn:openrelay.metered.ca:443?transport=tcp",
-      username: "openrelayproject",
-      credential: "openrelayproject",
+      urls: "turn:standard.relay.metered.ca:443",
+      username: TURN_USERNAME,
+      credential: TURN_CREDENTIAL,
+    },
+    {
+      urls: "turns:standard.relay.metered.ca:443?transport=tcp",
+      username: TURN_USERNAME,
+      credential: TURN_CREDENTIAL,
     },
   ]
 };
