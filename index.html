@@ -377,6 +377,13 @@ function connectSignaling() {
     switch (msg.type) {
       case "joined":
         isInitiator = msg.isInitiator;
+        // Если PeerConnection уже есть и работает — это просто переподключение
+        // сигнального канала (например, после heartbeat-паузы), а не новая
+        // сессия. Не трогаем уже установленное видео/аудио соединение.
+        if (pc && (pc.connectionState === "connected" || pc.connectionState === "connecting")) {
+          console.log("Signaling reconnected, keeping existing PeerConnection");
+          break;
+        }
         setStatus(isInitiator ? "Ждём собеседника…" : "Подключаемся к собеседнику…");
         setupPeerConnection();
         break;
@@ -386,12 +393,24 @@ function connectSignaling() {
         break;
 
       case "peer-joined":
+        // Аналогично: если уже соединены — это эхо от переподключения
+        // сигнального канала собеседника, а не реальный новый участник.
+        if (pc && (pc.connectionState === "connected" || pc.connectionState === "connecting")) {
+          console.log("Duplicate peer-joined ignored (already connected)");
+          break;
+        }
         setStatus("Собеседник подключился, устанавливаем соединение…");
         notifyPeerJoined();
         if (isInitiator) await makeOffer();
         break;
 
       case "peer-left":
+        // Игнорируем "уход" собеседника, если соединение у нас всё ещё
+        // рабочее — это тоже может быть просто моргание сигнального канала.
+        if (pc && pc.connectionState === "connected") {
+          console.log("peer-left ignored (connection still alive)");
+          break;
+        }
         setStatus("Собеседник вышел");
         remoteVideo.srcObject = null;
         break;
